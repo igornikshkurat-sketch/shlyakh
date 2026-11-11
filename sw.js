@@ -1,5 +1,5 @@
 // Service worker: застосунок працює без інтернету, переглянуті тайли карти кешуються.
-const APP = 'waysafe-app-v2';
+const APP = 'waysafe-app-v3';
 const TILES = 'waysafe-tiles-v1';
 const MAX_TILES = 20000;
 
@@ -8,7 +8,7 @@ const APP_FILES = [
   'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css',
   'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js',
   'https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js',
-  'https://unpkg.com/protomaps-leaflet@4.0.1/dist/protomaps-leaflet.js',
+  'https://unpkg.com/protomaps-leaflet@5.1.0/dist/protomaps-leaflet.js',
 ];
 
 self.addEventListener('install', e => {
