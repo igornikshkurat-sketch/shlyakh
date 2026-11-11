@@ -65,6 +65,7 @@
   <span id="badge" class="b-none">Немає GPS</span>
   <span class="stat">Швидк. <b id="spd">—</b> км/г</span>
   <span class="stat">Точн. <b id="acc">—</b></span>
+  <span id="obdTag" class="stat hidden" style="color:var(--ok);font-weight:700">OBD</span>
   <div id="msg"></div>
 </div>
 
@@ -91,7 +92,7 @@
   <div class="row">
     <button id="bPlaces">★ Місця</button>
     <button id="bTarget">🎯 Ціль</button>
-    <button id="bMenu">☰ Карти</button>
+    <button id="bMenu">☰ Меню</button>
   </div>
 </div>
 
@@ -266,13 +267,19 @@ function onFix(p) {
     if (v > CFG.maxSpeed && dist(S.lastFix, fix) > 300) bad = 'jump';
   }
   if (fix.speed != null && fix.speed > CFG.maxSpeed) bad = 'jump';
+  // звірка з реальною швидкістю авто з OBD: підмінений GPS «їде» не так, як машина
+  if (!bad && obdFresh()) {
+    if (fix.speed != null && Math.abs(fix.speed - OBD.speed) > 12) bad = 'obd';
+    if (S.lastFix && OBD.speed < 1 && now - S.lastFix.t < 10000 && dist(S.lastFix, fix) > 150) bad = 'obd';
+  }
 
   $('acc').textContent = Math.round(c.accuracy) + ' м';
 
   if (bad) {
     S.goodStreak = 0;
-    if (bad === 'jump') {
-      say('⚠️ Стрибок координат — ймовірне підмінення GPS (спуфінг). Ігнорую.');
+    if (bad === 'jump' || bad === 'obd') {
+      say(bad === 'obd' ? '⚠️ GPS не збігається зі швидкістю авто (OBD) — ймовірне підмінення. Ігнорую.'
+        : '⚠️ Стрибок координат — ймовірне підмінення GPS (спуфінг). Ігнорую.');
       enterDR('spoof');
     } else if (S.mode === 'gps') {
       setMode('weak');
@@ -341,8 +348,13 @@ function tick() {
   const now = performance.now(), dt = Math.min((now - lastTick) / 1000, 5);
   lastTick = now;
   if (!S.manualDR && S.mode !== 'dr' && S.lastFixTime && Date.now() - S.lastFixTime > CFG.lostAfter) enterDR('lost');
+  $('obdTag').classList.toggle('hidden', !obdFresh());
+  if (obdFresh() && OBD.speed > 1) S.drSpeed = OBD.speed; // запам'ятати на випадок втрати OBD
+  if (S.mode === 'gps' && !S.manualDR && obdFresh()) $('spd').textContent = Math.round(OBD.speed * 3.6);
   if ((S.mode === 'dr' || S.manualDR) && S.pos) {
-    const m = S.drSpeed * dt;
+    const vel = drVelocity();
+    const m = vel.v * dt;
+    updDrSpeed();
     if (onRoute()) {
       // їдемо вздовж збереженого маршруту — бічна похибка зникає
       if (m > 0 && RT.along < RT.total) {
@@ -361,7 +373,7 @@ function tick() {
         updateRoutePos();
       }
     }
-    S.speed = S.drSpeed;
+    S.speed = vel.v;
     render(false);
   }
 }
@@ -389,6 +401,116 @@ async function enableCompass() {
   return true;
 }
 
+// ---------- автозупинка: телефон відчуває, що авто стоїть ----------
+const MOT = { buf: [], std: null, stopped: false, since: 0, calStop: null, calMove: null, nS: 0, nM: 0,
+  on: store.get('autostop', true), cal: store.get('motCal', null) };
+if (MOT.cal) { MOT.calStop = MOT.cal[0]; MOT.calMove = MOT.cal[1]; MOT.nS = MOT.nM = 30; }
+window.addEventListener('devicemotion', e => {
+  const a = e.accelerationIncludingGravity || e.acceleration;
+  if (!a || a.x == null) return;
+  const t = performance.now();
+  MOT.buf.push([t, Math.hypot(a.x, a.y, a.z)]);
+  while (MOT.buf.length && t - MOT.buf[0][0] > 2000) MOT.buf.shift();
+});
+const motThreshold = () => (MOT.nS >= 20 && MOT.nM >= 20 && MOT.calMove > MOT.calStop * 1.5)
+  ? Math.sqrt(MOT.calStop * MOT.calMove) : 0.12;
+setInterval(() => {
+  const b = MOT.buf;
+  if (b.length < 15) { MOT.std = null; MOT.stopped = false; return; }
+  const m = b.reduce((s, x) => s + x[1], 0) / b.length;
+  MOT.std = Math.sqrt(b.reduce((s, x) => s + (x[1] - m) ** 2, 0) / b.length);
+  // автокалібрування: поки GPS надійний, запам'ятовуємо «вібрацію стоянки» і «вібрацію руху»
+  if (S.mode === 'gps' && !S.manualDR && S.lastFixTime && Date.now() - S.lastFixTime < 3000) {
+    const ema = (o, v) => o == null ? v : o * 0.95 + v * 0.05;
+    if (S.speed < 0.5) { MOT.calStop = ema(MOT.calStop, MOT.std); MOT.nS++; }
+    else if (S.speed > 5) { MOT.calMove = ema(MOT.calMove, MOT.std); MOT.nM++; }
+    if (MOT.nS >= 20 && MOT.nM >= 20 && (MOT.nS + MOT.nM) % 20 === 0) store.set('motCal', [MOT.calStop, MOT.calMove]);
+  }
+  const still = MOT.std < motThreshold();
+  if (still !== MOT.stopped) {
+    if (!MOT.since) MOT.since = Date.now();
+    if (Date.now() - MOT.since > (still ? 3000 : 1000)) { MOT.stopped = still; MOT.since = 0; }
+  } else MOT.since = 0;
+}, 500);
+
+// ---------- OBD-II адаптер (ELM327 Bluetooth LE): справжня швидкість з авто ----------
+const OBD = { dev: null, tx: null, speed: null, t: 0, buf: '', wait: null, timer: null, busy: false, status: 'не під’єднано', manualOff: false };
+const OBD_SERVICES = [0xfff0, 0xffe0, 0x18f0, 'e7810a71-73ae-499d-8c15-faa9aef0c3f2'];
+const obdFresh = () => OBD.speed != null && Date.now() - OBD.t < 4000;
+function obdStatus(s) {
+  OBD.status = s;
+  const el = document.getElementById('obdSt'); if (el) el.textContent = s;
+  $('obdTag').classList.toggle('hidden', !obdFresh());
+}
+function obdCmd(cmd, timeout) {
+  return new Promise(res => {
+    const to = setTimeout(() => { OBD.wait = null; OBD.buf = ''; res(''); }, timeout);
+    OBD.wait = r => { clearTimeout(to); res(r); };
+    const data = new TextEncoder().encode(cmd + '\r');
+    const w = OBD.tx.properties.writeWithoutResponse ? OBD.tx.writeValueWithoutResponse(data) : OBD.tx.writeValueWithResponse(data);
+    w.catch(() => { clearTimeout(to); OBD.wait = null; res(''); });
+  });
+}
+async function obdSetup(dev) {
+  obdStatus('з’єднання…');
+  const srv = await dev.gatt.connect();
+  let rx = null, tx = null;
+  for (const id of OBD_SERVICES) {
+    let s; try { s = await srv.getPrimaryService(id); } catch { continue; }
+    for (const c of await s.getCharacteristics()) {
+      if (!rx && (c.properties.notify || c.properties.indicate)) rx = c;
+      if (!tx && (c.properties.write || c.properties.writeWithoutResponse)) tx = c;
+    }
+    if (rx && tx) break;
+    rx = tx = null;
+  }
+  if (!rx || !tx) throw new Error('пристрій не схожий на OBD-адаптер ELM327 BLE');
+  OBD.tx = tx;
+  await rx.startNotifications();
+  rx.addEventListener('characteristicvaluechanged', e => {
+    OBD.buf += new TextDecoder().decode(e.target.value);
+    if (OBD.buf.includes('>')) { const r = OBD.buf; OBD.buf = ''; const w = OBD.wait; OBD.wait = null; if (w) w(r); }
+  });
+  obdStatus('налаштування адаптера…');
+  for (const c of ['ATZ', 'ATE0', 'ATL0', 'ATS0', 'ATH0', 'ATSP0']) await obdCmd(c, c === 'ATZ' ? 3000 : 1500);
+  obdStatus('під’єднано, чекаю дані авто…');
+  clearInterval(OBD.timer); OBD.busy = false;
+  OBD.timer = setInterval(async () => {
+    if (OBD.busy) return; OBD.busy = true;
+    try {
+      const r = (await obdCmd('010D', 3000)).replace(/\s/g, '').toUpperCase();
+      const m = r.match(/410D([0-9A-F]{2})/);
+      if (m) { OBD.speed = parseInt(m[1], 16) / 3.6; OBD.t = Date.now(); obdStatus('працює: ' + Math.round(OBD.speed * 3.6) + ' км/г'); }
+      else if (/UNABLETOCONNECT|NODATA|ERROR/.test(r)) obdStatus('адаптер є, але авто не відповідає (запаліть двигун)');
+    } catch {}
+    OBD.busy = false;
+  }, 700);
+}
+async function obdConnect() {
+  if (!navigator.bluetooth) { alert('Bluetooth недоступний. Потрібен Chrome на Android і відкритий сайт через https.'); return; }
+  try {
+    const dev = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: OBD_SERVICES });
+    OBD.dev = dev; OBD.manualOff = false;
+    dev.addEventListener('gattserverdisconnected', () => {
+      clearInterval(OBD.timer); OBD.speed = null; obdStatus('зв’язок втрачено, перепідключаю…');
+      if (!OBD.manualOff) setTimeout(() => obdSetup(dev).catch(() => obdStatus('відключено — під’єднайте знову')), 3000);
+    });
+    await obdSetup(dev);
+  } catch (e) { obdStatus(e.name === 'NotFoundError' ? 'не вибрано' : 'помилка: ' + e.message); }
+}
+function obdDisconnect() {
+  OBD.manualOff = true; clearInterval(OBD.timer); OBD.speed = null;
+  if (OBD.dev && OBD.dev.gatt.connected) OBD.dev.gatt.disconnect();
+  obdStatus('не під’єднано');
+}
+
+// яку швидкість використовувати без GPS
+function drVelocity() {
+  if (obdFresh()) return { v: OBD.speed, src: 'obd' };
+  if (MOT.on && MOT.stopped) return { v: 0, src: 'stop' };
+  return { v: S.drSpeed, src: 'manual' };
+}
+
 // ---------- UI ----------
 function setMode(m) {
   S.mode = m;
@@ -406,7 +528,11 @@ function setMode(m) {
 }
 function say(t) { $('msg').textContent = t; }
 function setFollow(v) { S.follow = v; $('bFollow').classList.toggle('on', v); if (v) render(true); }
-function updDrSpeed() { $('drSpeed').textContent = Math.round(S.drSpeed * 3.6) + ' км/г'; }
+function updDrSpeed() {
+  const v = drVelocity();
+  $('drSpeed').textContent = v.src === 'obd' ? 'OBD ' + Math.round(v.v * 3.6) + ' км/г'
+    : v.src === 'stop' ? 'стоїмо' : Math.round(v.v * 3.6) + ' км/г';
+}
 
 let lastSave = 0, lastTrail = null;
 function render(pan) {
@@ -552,7 +678,18 @@ $('bPlaces').onclick = () => {
 
 $('bMenu').onclick = async () => {
   const info = await offlineInfo();
-  openSheet(`<h3>Офлайн-карти та налаштування</h3>
+  const calOk = MOT.nS >= 20 && MOT.nM >= 20;
+  openSheet(`<h3>Швидкість без GPS</h3>
+    <p><b>OBD-адаптер:</b> <span id="obdSt">${esc(OBD.status)}</span></p>
+    <p>Адаптер ELM327 <b>Bluetooth LE</b> у діагностичному роз’ємі авто дає справжню швидкість з датчиків машини — без GPS.
+    Увімкніть Bluetooth і геолокацію телефона, запаліть двигун.</p>
+    <div class="row"><button id="obdOn" class="primary">Під’єднати OBD</button><button id="obdOff">Відключити</button></div>
+    <label class="chk"><input type="checkbox" id="cStop" ${MOT.on ? 'checked' : ''}>
+      Автозупинка: коли авто стоїть, позиція не рухається (за вібрацією телефона)</label>
+    <p>Датчик вібрації: ${MOT.std == null ? 'немає даних' : (MOT.stopped ? 'стоїмо' : 'рух') + ' (' + MOT.std.toFixed(3) + ')'} ·
+    ${calOk ? 'відкалібровано під ваше авто' : 'калібрується автоматично, поки є GPS (постійте й поїдьте кілька хвилин)'}.
+    Телефон має бути в тримачі, а не в руці.</p>
+    <h3 style="margin-top:16px">Офлайн-карти та налаштування</h3>
     <p><b>Файл карти (.pmtiles):</b> ${info}</p>
     <div class="row"><button id="loadMap" class="primary">Завантажити файл карти</button><button id="rmMap">Видалити файл</button></div>
     <p>Без файлу використовується OpenStreetMap: усе, що ви переглядали онлайн, зберігається в кеші й доступне без інтернету.
@@ -561,6 +698,9 @@ $('bMenu').onclick = async () => {
       Брати напрям з компаса телефона, коли немає GPS (в авто може бути неточним)</label>
     <label class="chk"><input type="checkbox" id="cWake" ${wakeOn ? 'checked' : ''}> Не вимикати екран</label>
     <div class="row"><button id="clrTrail">Очистити трек</button><button id="closeS">Закрити</button></div>`);
+  $('obdOn').onclick = obdConnect;
+  $('obdOff').onclick = obdDisconnect;
+  $('cStop').onchange = e => { MOT.on = e.target.checked; store.set('autostop', MOT.on); updDrSpeed(); };
   $('loadMap').onclick = () => $('fileIn').click();
   $('rmMap').onclick = async () => { await idbDel('map'); useOsm(); closeSheet(); };
   $('cCompass').onchange = async e => {
