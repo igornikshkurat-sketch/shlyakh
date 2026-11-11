@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#111418">
+<title>Шлях Офлайн</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"></script>
+<script src="https://unpkg.com/protomaps-leaflet@4.0.1/dist/protomaps-leaflet.js"></script>
+<style>
+  :root {
+    --bg: #111418; --panel: rgba(20,24,30,.94); --text: #f2f4f7; --muted: #9aa4b2;
+    --ok: #22c55e; --warn: #f59e0b; --bad: #ef4444; --dr: #3b82f6; --btn: #262c35; --btn-on: #3b4452;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 16px/1.3 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  #map { position: absolute; inset: 0; background: #d9d4cc; }
+  .bar { position: absolute; left: 8px; right: 8px; z-index: 1000; background: var(--panel);
+    border-radius: 14px; padding: 8px 10px; box-shadow: 0 4px 18px rgba(0,0,0,.35); }
+  #top { top: calc(8px + env(safe-area-inset-top)); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  #bottom { bottom: calc(8px + env(safe-area-inset-bottom)); }
+  #badge { font-weight: 700; padding: 6px 10px; border-radius: 10px; font-size: 15px; white-space: nowrap; }
+  .b-ok { background: var(--ok); color: #04210f; } .b-warn { background: var(--warn); color: #2a1a00; }
+  .b-bad { background: var(--bad); color: #fff; } .b-dr { background: var(--dr); color: #fff; }
+  .b-none { background: #4b5563; color: #fff; }
+  .stat { font-size: 14px; color: var(--muted); } .stat b { color: var(--text); font-size: 17px; }
+  #msg { width: 100%; font-size: 13px; color: var(--muted); }
+  #msg:empty { display: none; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .row + .row { margin-top: 6px; }
+  button { flex: 1 1 auto; min-height: 48px; min-width: 48px; border: 0; border-radius: 12px; background: var(--btn);
+    color: var(--text); font: 600 15px system-ui, sans-serif; padding: 6px 10px; cursor: pointer; }
+  button:active { filter: brightness(1.3); }
+  button.on { background: var(--btn-on); outline: 2px solid var(--dr); }
+  button.primary { background: var(--dr); }
+  #drRow { align-items: center; }
+  #drRow.hidden, .hidden { display: none !important; }
+  #drSpeed { font-size: 20px; font-weight: 700; min-width: 90px; text-align: center; }
+  #target { display: flex; align-items: center; gap: 10px; }
+  #arrow { width: 40px; height: 40px; transition: transform .3s; }
+  #hint { position: absolute; z-index: 1001; left: 50%; top: 45%; transform: translate(-50%,-50%);
+    background: var(--panel); padding: 12px 16px; border-radius: 12px; text-align: center; pointer-events: none; max-width: 85vw; }
+  .sheet { position: absolute; inset: 0; z-index: 2000; background: rgba(0,0,0,.55); display: flex; align-items: flex-end; }
+  .sheet > div { background: #181c22; width: 100%; max-height: 80vh; overflow: auto; border-radius: 16px 16px 0 0;
+    padding: 16px 16px calc(16px + env(safe-area-inset-bottom)); }
+  .sheet h3 { margin: 0 0 10px; }
+  .sheet p { color: var(--muted); font-size: 14px; margin: 6px 0 10px; }
+  .place { display: flex; gap: 6px; align-items: center; padding: 6px 0; border-bottom: 1px solid #2a313b; }
+  .place span { flex: 1; } .place button { flex: 0 0 auto; min-height: 40px; }
+  label.chk { display: flex; gap: 10px; align-items: center; padding: 8px 0; }
+  label.chk input { width: 22px; height: 22px; }
+  .me-icon { width: 26px; height: 26px; }
+  .leaflet-control-attribution { font-size: 10px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="top" class="bar">
+  <span id="badge" class="b-none">Немає GPS</span>
+  <span class="stat">Швидк. <b id="spd">—</b> км/г</span>
+  <span class="stat">Точн. <b id="acc">—</b></span>
+  <div id="msg"></div>
+</div>
+
+<div id="hint" class="hidden"></div>
+
+<div id="bottom" class="bar">
+  <div id="target" class="row hidden">
+    <svg id="arrow" viewBox="0 0 40 40"><path d="M20 3 L32 35 L20 27 L8 35 Z" fill="#f59e0b"/></svg>
+    <div style="flex:1"><b id="tDist">—</b> <span class="stat" id="tName"></span><br><span class="stat" id="tBear"></span></div>
+    <button id="tClear" style="flex:0 0 auto">✕</button>
+  </div>
+  <div id="drRow" class="row hidden">
+    <button id="spdMinus">−10</button>
+    <div id="drSpeed">0 км/г</div>
+    <button id="spdPlus">+10</button>
+    <button id="useGps" class="hidden">Прийняти GPS</button>
+  </div>
+  <div class="row">
+    <button id="bFollow" class="on" title="Слідувати">◎ Слідувати</button>
+    <button id="bHere">📍 Я тут</button>
+    <button id="bDR">🧭 Без GPS</button>
+  </div>
+  <div class="row">
+    <button id="bPlaces">★ Місця</button>
+    <button id="bTarget">🎯 Ціль</button>
+    <button id="bMenu">☰ Карти</button>
+  </div>
+</div>
+
+<div id="sheet" class="sheet hidden"><div id="sheetBody"></div></div>
+<input id="fileIn" type="file" accept=".pmtiles" class="hidden">
+
+<script>
+'use strict';
+// ---------- налаштування ----------
+const CFG = {
+  maxAccuracy: 150,          // м — гірше вважається ненадійним
+  maxSpeed: 60,              // м/с (~216 км/г) — швидше = стрибок/спуфінг
+  lostAfter: 12000,          // мс без фіксації → рахункова навігація
+  goodToRecover: 4,          // скільки поспіль хороших фіксацій, щоб повернутись до GPS
+  recoverMaxGap: 800,        // м — GPS має бути поблизу оцінки, інакше питаємо
+};
+const $ = id => document.getElementById(id);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('ws_' + k); return v ? JSON.parse(v) : d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('ws_' + k, JSON.stringify(v)); } catch {} },
+};
+
+// ---------- геометрія ----------
+const R = 6371000, rad = d => d * Math.PI / 180, deg = r => r * 180 / Math.PI;
+function dist(a, b) {
+  const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
+  const h = Math.sin(dLat/2)**2 + Math.cos(rad(a.lat))*Math.cos(rad(b.lat))*Math.sin(dLng/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function bearing(a, b) {
+  const y = Math.sin(rad(b.lng - a.lng)) * Math.cos(rad(b.lat));
+  const x = Math.cos(rad(a.lat))*Math.sin(rad(b.lat)) - Math.sin(rad(a.lat))*Math.cos(rad(b.lat))*Math.cos(rad(b.lng - a.lng));
+  return (deg(Math.atan2(y, x)) + 360) % 360;
+}
+function move(p, brg, m) {
+  const d = m / R, t = rad(brg), la = rad(p.lat), lo = rad(p.lng);
+  const la2 = Math.asin(Math.sin(la)*Math.cos(d) + Math.cos(la)*Math.sin(d)*Math.cos(t));
+  const lo2 = lo + Math.atan2(Math.sin(t)*Math.sin(d)*Math.cos(la), Math.cos(d) - Math.sin(la)*Math.sin(la2));
+  return { lat: deg(la2), lng: deg(lo2) };
+}
+const fmtDist = m => m < 1000 ? Math.round(m) + ' м' : (m / 1000).toFixed(m < 10000 ? 1 : 0) + ' км';
+const dirName = b => ['Пн','ПнСх','Сх','ПдСх','Пд','ПдЗх','Зх','ПнЗх'][Math.round(b / 45) % 8];
+
+// ---------- стан ----------
+const S = {
+  pos: store.get('lastPos', null),       // {lat,lng} — наша найкраща оцінка
+  heading: store.get('lastHeading', 0),
+  speed: 0,                               // м/с
+  mode: 'none',                           // gps | weak | dr | none
+  manualDR: false,
+  drSpeed: store.get('drSpeed', 50 / 3.6),
+  unc: 0,                                 // невизначеність, м
+  lastFix: null,                          // остання прийнята GPS фіксація {lat,lng,t}
+  lastFixTime: 0,
+  goodStreak: 0,
+  pendingGps: null,                       // GPS, що «повернувся» далеко від оцінки
+  compass: null, useCompass: store.get('useCompass', false),
+  follow: true, tapMode: null,
+  target: store.get('target', null),
+  places: store.get('places', []),
+};
+
+// ---------- карта ----------
+const map = L.map('map', { zoomControl: false, attributionControl: true })
+  .setView(S.pos ? [S.pos.lat, S.pos.lng] : [50.45, 30.52], S.pos ? 15 : 6);
+const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '© OpenStreetMap',
+});
+let offlineLayer = null;
+
+const meIcon = L.divIcon({ className: '', iconSize: [30, 30], iconAnchor: [15, 15],
+  html: '<svg class="me-icon" id="meSvg" viewBox="0 0 30 30" style="width:30px;height:30px"><circle cx="15" cy="15" r="13" fill="#fff"/><path d="M15 4 L23 24 L15 19 L7 24 Z" fill="#2563eb"/></svg>' });
+const me = L.marker([0, 0], { icon: meIcon, interactive: false, zIndexOffset: 1000 });
+const uncCircle = L.circle([0, 0], { radius: 1, color: '#3b82f6', weight: 1, fillOpacity: .12, interactive: false });
+const rawGps = L.circleMarker([0, 0], { radius: 6, color: '#ef4444', weight: 2, fillOpacity: .2, interactive: false });
+const targetMk = L.marker([0, 0], { title: 'Ціль' });
+const placeLayer = L.layerGroup().addTo(map);
+const trail = L.polyline([], { color: '#2563eb', weight: 4, opacity: .5 }).addTo(map);
+
+map.on('dragstart', () => setFollow(false));
+map.on('click', e => onMapTap(e.latlng));
+
+// ---------- GPS ----------
+function onFix(p) {
+  const c = p.coords, now = p.timestamp || Date.now();
+  const fix = { lat: c.latitude, lng: c.longitude, t: now, acc: c.accuracy,
+    speed: c.speed, heading: c.heading };
+  rawGps.setLatLng([fix.lat, fix.lng]);
+  if (!map.hasLayer(rawGps)) rawGps.addTo(map);
+
+  let bad = null;
+  if (!(c.accuracy <= CFG.maxAccuracy)) bad = 'weak';
+  if (S.lastFix) {
+    const dt = Math.max((now - S.lastFix.t) / 1000, 0.5);
+    const v = dist(S.lastFix, fix) / dt;
+    if (v > CFG.maxSpeed && dist(S.lastFix, fix) > 300) bad = 'jump';
+  }
+  if (fix.speed != null && fix.speed > CFG.maxSpeed) bad = 'jump';
+
+  $('acc').textContent = Math.round(c.accuracy) + ' м';
+
+  if (bad) {
+    S.goodStreak = 0;
+    if (bad === 'jump') {
+      say('⚠️ Стрибок координат — ймовірне підмінення GPS (спуфінг). Ігнорую.');
+      enterDR('spoof');
+    } else if (S.mode === 'gps') {
+      setMode('weak');
+    }
+    return;
+  }
+
+  // хороша фіксація
+  S.goodStreak++;
+  const inDR = S.mode === 'dr' || S.manualDR;
+  if (inDR) {
+    // повертаємось до GPS тільки після кількох стабільних фіксацій поспіль
+    S.lastFix = fix; // для перевірки стрибків між ними
+    if (S.manualDR || S.goodStreak < CFG.goodToRecover) return;
+    if (S.pos && dist(S.pos, fix) > Math.max(CFG.recoverMaxGap, S.unc * 2)) {
+      S.pendingGps = fix;
+      $('useGps').classList.remove('hidden');
+      say('GPS знову є, але показує ' + fmtDist(dist(S.pos, fix)) + ' від оцінки. Перевірте й натисніть «Прийняти GPS».');
+      return;
+    }
+  }
+  acceptFix(fix);
+}
+
+function acceptFix(fix) {
+  S.pendingGps = null; $('useGps').classList.add('hidden');
+  if (S.lastFix && fix.speed == null) {
+    const dt = (fix.t - S.lastFix.t) / 1000;
+    if (dt > 0) S.speed = dist(S.lastFix, fix) / dt;
+  } else S.speed = fix.speed || 0;
+  if (fix.heading != null && !isNaN(fix.heading) && S.speed > 2) S.heading = fix.heading;
+  else if (S.lastFix && dist(S.lastFix, fix) > 8) S.heading = bearing(S.lastFix, fix);
+  if (S.speed > 2) { S.drSpeed = S.speed; store.set('drSpeed', S.drSpeed); }
+  S.pos = { lat: fix.lat, lng: fix.lng };
+  S.unc = fix.acc; S.lastFix = fix; S.lastFixTime = Date.now();
+  setMode('gps');
+  say('');
+  render(true);
+}
+
+function onGpsError(e) {
+  if (e.code === 1) say('Доступ до геолокації заборонено. Працює лише ручний режим («Я тут»).');
+}
+
+function startGps() {
+  if (!('geolocation' in navigator)) { say('Геолокація недоступна в цьому браузері.'); return; }
+  navigator.geolocation.watchPosition(onFix, onGpsError, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
+}
+
+// ---------- рахункова навігація (dead reckoning) ----------
+function enterDR(reason) {
+  if (S.mode !== 'dr') {
+    setMode('dr');
+    if (reason === 'lost') say('GPS зник — рахункова навігація. Звіряйте швидкість зі спідометром, уточнюйте «Я тут».');
+  }
+  if (reason === 'spoof') S.lastFixTime = 0;
+}
+
+let lastTick = performance.now();
+function tick() {
+  const now = performance.now(), dt = Math.min((now - lastTick) / 1000, 5);
+  lastTick = now;
+  if (!S.manualDR && S.mode !== 'dr' && S.lastFixTime && Date.now() - S.lastFixTime > CFG.lostAfter) enterDR('lost');
+  if ((S.mode === 'dr' || S.manualDR) && S.pos) {
+    const h = (S.useCompass && S.compass != null) ? S.compass : S.heading;
+    S.heading = h;
+    const m = S.drSpeed * dt;
+    if (m > 0) {
+      S.pos = move(S.pos, h, m);
+      S.unc += m * 0.07 + 0.3 * dt;
+    }
+    S.speed = S.drSpeed;
+    render(false);
+  }
+}
+setInterval(tick, 1000);
+
+// компас (у машині може бути неточним через метал — тому вимкнено за замовчуванням)
+function onOrient(e) {
+  let h = null;
+  if (e.webkitCompassHeading != null) h = e.webkitCompassHeading;
+  else if (e.absolute && e.alpha != null) h = (360 - e.alpha) % 360;
+  if (h != null) {
+    const scr = (screen.orientation && screen.orientation.angle) || 0;
+    S.compass = (h + scr) % 360;
+  }
+}
+async function enableCompass() {
+  try {
+    if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) {
+      const r = await DeviceOrientationEvent.requestPermission();
+      if (r !== 'granted') return false;
+    }
+  } catch { return false; }
+  window.addEventListener('deviceorientationabsolute', onOrient, true);
+  window.addEventListener('deviceorientation', onOrient, true);
+  return true;
+}
+
+// ---------- UI ----------
+function setMode(m) {
+  S.mode = m;
+  const b = $('badge');
+  const dr = S.manualDR || m === 'dr';
+  const map_ = {
+    gps: ['b-ok', 'GPS ✓'], weak: ['b-warn', 'GPS слабкий'],
+    dr: ['b-dr', 'Без GPS (оцінка)'], none: ['b-none', 'Немає GPS'],
+  };
+  const [cls, txt] = S.manualDR ? ['b-dr', 'Без GPS (ручний)'] : map_[m];
+  b.className = cls; b.textContent = txt;
+  $('drRow').classList.toggle('hidden', !dr);
+  $('bDR').classList.toggle('on', S.manualDR);
+  updDrSpeed();
+}
+function say(t) { $('msg').textContent = t; }
+function setFollow(v) { S.follow = v; $('bFollow').classList.toggle('on', v); if (v) render(true); }
+function updDrSpeed() { $('drSpeed').textContent = Math.round(S.drSpeed * 3.6) + ' км/г'; }
+
+let lastSave = 0, lastTrail = null;
+function render(pan) {
+  if (!S.pos) return;
+  const ll = [S.pos.lat, S.pos.lng];
+  me.setLatLng(ll); if (!map.hasLayer(me)) me.addTo(map);
+  uncCircle.setLatLng(ll).setRadius(Math.max(S.unc, 5)); if (!map.hasLayer(uncCircle)) uncCircle.addTo(map);
+  const svg = document.getElementById('meSvg');
+  if (svg) svg.style.transform = `rotate(${S.heading}deg)`;
+  $('spd').textContent = Math.round(S.speed * 3.6);
+  if (S.mode !== 'gps') $('acc').textContent = '±' + fmtDist(S.unc);
+  if (lastTrail && dist(lastTrail, S.pos) > 2000) trail.setLatLngs([]); // ручне переміщення / прийнятий GPS — новий відрізок
+  if (!lastTrail || dist(lastTrail, S.pos) > 15) { trail.addLatLng(ll); lastTrail = S.pos; }
+  if (S.follow) map.panTo(ll, { animate: false });
+  if (Date.now() - lastSave > 5000) { store.set('lastPos', S.pos); store.set('lastHeading', S.heading); lastSave = Date.now(); }
+  renderTarget();
+}
+
+function renderTarget() {
+  if (!S.target) { $('target').classList.add('hidden'); if (map.hasLayer(targetMk)) map.removeLayer(targetMk); return; }
+  targetMk.setLatLng([S.target.lat, S.target.lng]); if (!map.hasLayer(targetMk)) targetMk.addTo(map);
+  $('target').classList.remove('hidden');
+  $('tName').textContent = S.target.name || '';
+  if (!S.pos) { $('tDist').textContent = '—'; return; }
+  const d = dist(S.pos, S.target), b = bearing(S.pos, S.target);
+  $('tDist').textContent = fmtDist(d);
+  $('tBear').textContent = 'напрям ' + dirName(b) + ' (' + Math.round(b) + '°), по прямій';
+  $('arrow').style.transform = `rotate(${(b - S.heading + 360) % 360}deg)`;
+}
+
+function hint(t) { const h = $('hint'); h.textContent = t; h.classList.toggle('hidden', !t); }
+
+function onMapTap(ll) {
+  const p = { lat: ll.lat, lng: ll.lng };
+  if (S.tapMode === 'here') {
+    S.pos = p; S.unc = 30; S.tapMode = 'heading';
+    if (S.mode !== 'gps' && !S.manualDR) setMode('dr');
+    render(false);
+    hint('Тепер торкніться точки на дорозі ПОПЕРЕДУ — це задасть напрям руху. (Або «Я тут» ще раз, щоб пропустити.)');
+  } else if (S.tapMode === 'heading') {
+    if (S.pos) S.heading = bearing(S.pos, p);
+    S.tapMode = null; hint(''); render(false);
+    say('Позицію і напрям задано вручну.');
+  } else if (S.tapMode === 'target') {
+    S.target = { ...p, name: '' }; store.set('target', S.target);
+    S.tapMode = null; hint(''); renderTarget();
+  } else if (S.tapMode === 'place') {
+    const name = prompt('Назва місця:', 'Місце ' + (S.places.length + 1));
+    S.tapMode = null; hint('');
+    if (name) { S.places.push({ ...p, name }); store.set('places', S.places); drawPlaces(); }
+  }
+}
+
+function drawPlaces() {
+  placeLayer.clearLayers();
+  S.places.forEach(pl => L.circleMarker([pl.lat, pl.lng], { radius: 7, color: '#f59e0b', fillOpacity: .9 })
+    .bindTooltip(pl.name, { permanent: false }).addTo(placeLayer));
+}
+
+// ---------- кнопки ----------
+$('bFollow').onclick = () => setFollow(!S.follow);
+$('bHere').onclick = () => {
+  if (S.tapMode === 'heading') { S.tapMode = null; hint(''); return; }
+  S.tapMode = 'here'; setFollow(false);
+  hint('Торкніться карти там, де ви зараз (перехрестя, міст, заправка, вказівник).');
+};
+$('bDR').onclick = () => {
+  S.manualDR = !S.manualDR;
+  if (!S.manualDR) { S.goodStreak = 0; say('Очікую стабільний GPS…'); }
+  else say('Ручний режим без GPS: супутникові дані ігноруються.');
+  setMode(S.manualDR ? 'dr' : (S.mode === 'dr' ? 'dr' : S.mode));
+};
+$('spdMinus').onclick = () => { S.drSpeed = Math.max(0, S.drSpeed - 10/3.6); store.set('drSpeed', S.drSpeed); updDrSpeed(); };
+$('spdPlus').onclick = () => { S.drSpeed = Math.min(200/3.6, S.drSpeed + 10/3.6); store.set('drSpeed', S.drSpeed); updDrSpeed(); };
+$('useGps').onclick = () => { if (S.pendingGps) acceptFix(S.pendingGps); };
+$('tClear').onclick = () => { S.target = null; store.set('target', null); renderTarget(); };
+$('bTarget').onclick = () => { S.tapMode = 'target'; setFollow(false); hint('Торкніться карти — точка призначення.'); };
+
+$('sheet').onclick = e => { if (e.target.id === 'sheet') closeSheet(); };
+function openSheet(html) { $('sheetBody').innerHTML = html; $('sheet').classList.remove('hidden'); }
+function closeSheet() { $('sheet').classList.add('hidden'); }
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+
+$('bPlaces').onclick = () => {
+  const list = S.places.map((p, i) => `<div class="place"><span>${esc(p.name)}</span>
+      <button data-go="${i}">🎯</button><button data-here="${i}">📍 Я тут</button><button data-del="${i}">🗑</button></div>`).join('')
+    || '<p>Ще немає збережених місць.</p>';
+  openSheet(`<h3>Збережені місця</h3>
+    <p>«📍 Я тут» — миттєво виставити свою позицію на відоме місце (корисно, коли GPS глушать).</p>
+    ${list}
+    <div class="row" style="margin-top:10px"><button id="addPlace" class="primary">+ Додати на карті</button>
+    <button id="addCur">+ Поточна позиція</button></div>`);
+  $('sheetBody').querySelectorAll('[data-go]').forEach(b => b.onclick = () => {
+    const p = S.places[+b.dataset.go]; S.target = { ...p }; store.set('target', S.target); closeSheet(); renderTarget(); });
+  $('sheetBody').querySelectorAll('[data-here]').forEach(b => b.onclick = () => {
+    const p = S.places[+b.dataset.here]; S.pos = { lat: p.lat, lng: p.lng }; S.unc = 50;
+    if (S.mode !== 'gps' && !S.manualDR) setMode('dr'); closeSheet(); setFollow(true); });
+  $('sheetBody').querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
+    S.places.splice(+b.dataset.del, 1); store.set('places', S.places); drawPlaces(); $('bPlaces').onclick(); });
+  $('addPlace').onclick = () => { closeSheet(); S.tapMode = 'place'; setFollow(false); hint('Торкніться карти, щоб додати місце.'); };
+  $('addCur').onclick = () => { if (!S.pos) return; const name = prompt('Назва місця:', 'Місце ' + (S.places.length + 1));
+    if (name) { S.places.push({ ...S.pos, name }); store.set('places', S.places); drawPlaces(); $('bPlaces').onclick(); } };
+};
+
+$('bMenu').onclick = async () => {
+  const info = await offlineInfo();
+  openSheet(`<h3>Офлайн-карти та налаштування</h3>
+    <p><b>Файл карти (.pmtiles):</b> ${info}</p>
+    <div class="row"><button id="loadMap" class="primary">Завантажити файл карти</button><button id="rmMap">Видалити файл</button></div>
+    <p>Без файлу використовується OpenStreetMap: усе, що ви переглядали онлайн, зберігається в кеші й доступне без інтернету.
+    Перед поїздкою прогляньте маршрут на потрібних масштабах.</p>
+    <label class="chk"><input type="checkbox" id="cCompass" ${S.useCompass ? 'checked' : ''}>
+      Брати напрям з компаса телефона, коли немає GPS (в авто може бути неточним)</label>
+    <label class="chk"><input type="checkbox" id="cWake" ${wakeOn ? 'checked' : ''}> Не вимикати екран</label>
+    <div class="row"><button id="clrTrail">Очистити трек</button><button id="closeS">Закрити</button></div>`);
+  $('loadMap').onclick = () => $('fileIn').click();
+  $('rmMap').onclick = async () => { await idbDel('map'); useOsm(); closeSheet(); };
+  $('cCompass').onchange = async e => {
+    S.useCompass = e.target.checked;
+    if (S.useCompass && !(await enableCompass())) { S.useCompass = false; e.target.checked = false; alert('Компас недоступний.'); }
+    store.set('useCompass', S.useCompass);
+  };
+  $('cWake').onchange = e => e.target.checked ? wake() : unwake();
+  $('clrTrail').onclick = () => { trail.setLatLngs([]); lastTrail = null; };
+  $('closeS').onclick = closeSheet;
+};
+
+// ---------- офлайн PMTiles (зберігається в IndexedDB) ----------
+function idb() {
+  return new Promise((res, rej) => { const r = indexedDB.open('waysafe', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('files'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+}
+async function idbOp(mode, fn) { const db = await idb(); return new Promise((res, rej) => {
+  const tx = db.transaction('files', mode), q = fn(tx.objectStore('files'));
+  tx.oncomplete = () => res(q && q.result); tx.onerror = () => rej(tx.error); }); }
+const idbGet = k => idbOp('readonly', s => s.get(k));
+const idbPut = (k, v) => idbOp('readwrite', s => s.put(v, k));
+const idbDel = k => idbOp('readwrite', s => s.delete(k));
+
+async function offlineInfo() {
+  try { const f = await idbGet('map'); return f ? `${esc(f.name)} (${(f.blob.size / 1048576).toFixed(0)} МБ) — активна` : 'не завантажено'; }
+  catch { return 'недоступно'; }
+}
+function useOsm() { if (offlineLayer) { map.removeLayer(offlineLayer); offlineLayer = null; } if (!map.hasLayer(osm)) osm.addTo(map); }
+function usePmtiles(blob, name) {
+  try {
+    const file = new File([blob], name || 'map.pmtiles');
+    const p = new pmtiles.PMTiles(new pmtiles.FileSource(file));
+    const layer = protomapsL.leafletLayer({ url: p, flavor: 'light', lang: 'uk', attribution: '© OpenStreetMap, Protomaps' });
+    if (offlineLayer) map.removeLayer(offlineLayer);
+    if (map.hasLayer(osm)) map.removeLayer(osm);
+    offlineLayer = layer.addTo(map);
+    p.getHeader().then(h => { if (!S.pos && h.centerLat) map.setView([h.centerLat, h.centerLon], h.centerZoom || 8); }).catch(() => {});
+    return true;
+  } catch (e) { console.error(e); alert('Не вдалося відкрити файл карти: ' + e.message); useOsm(); return false; }
+}
+$('fileIn').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  closeSheet(); say('Зберігаю карту в пам’ять телефону…');
+  try {
+    if (navigator.storage && navigator.storage.persist) await navigator.storage.persist();
+    await idbPut('map', { name: f.name, blob: f });
+    const saved = await idbGet('map');
+    usePmtiles(saved.blob, saved.name);
+    say('Офлайн-карту збережено: ' + f.name);
+  } catch (err) { say('Помилка збереження: ' + err.message + '. Можливо, бракує місця.'); }
+  e.target.value = '';
+};
+
+// ---------- екран не гасне ----------
+let wakeLock = null, wakeOn = store.get('wake', true);
+async function wake() { wakeOn = true; store.set('wake', true);
+  try { wakeLock = await navigator.wakeLock.request('screen'); } catch {} }
+function unwake() { wakeOn = false; store.set('wake', false); if (wakeLock) wakeLock.release(); wakeLock = null; }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && wakeOn) wake(); });
+
+// ---------- старт ----------
+(async function init() {
+  try { const f = await idbGet('map'); if (f) usePmtiles(f.blob, f.name); else useOsm(); } catch { useOsm(); }
+  drawPlaces(); setMode('none'); render(true); renderTarget();
+  if (S.useCompass) enableCompass();
+  if (wakeOn) wake();
+  startGps();
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if (!S.pos) say('Очікую GPS… Або натисніть «Я тут» і вкажіть позицію на карті.');
+})();
+</script>
+</body>
+</html>

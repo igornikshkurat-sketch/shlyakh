@@ -1,0 +1,15 @@
+{
+  "name": "Шлях Офлайн",
+  "short_name": "Шлях",
+  "description": "Офлайн-карта для водіїв зі стійкістю до глушіння та підміни GPS",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#111418",
+  "theme_color": "#111418",
+  "lang": "uk",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
