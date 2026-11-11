@@ -74,6 +74,7 @@
   <div id="target" class="row hidden">
     <svg id="arrow" viewBox="0 0 40 40"><path d="M20 3 L32 35 L20 27 L8 35 Z" fill="#f59e0b"/></svg>
     <div style="flex:1"><b id="tDist">—</b> <span class="stat" id="tName"></span><br><span class="stat" id="tBear"></span></div>
+    <button id="reroute" class="hidden" style="flex:0 0 auto">↻ Маршрут</button>
     <button id="tClear" style="flex:0 0 auto">✕</button>
   </div>
   <div id="drRow" class="row hidden">
@@ -170,6 +171,82 @@ const targetMk = L.marker([0, 0], { title: 'Ціль' });
 const placeLayer = L.layerGroup().addTo(map);
 const trail = L.polyline([], { color: '#2563eb', weight: 4, opacity: .5 }).addTo(map);
 
+// ---------- маршрут (прокладається онлайн, зберігається й працює офлайн) ----------
+const routeLine = L.polyline([], { color: '#7c3aed', weight: 6, opacity: .7, interactive: false }).addTo(map);
+let RT = null; // { pts:[[lat,lng]], cum:[м], total, idx, along, off }
+const P = a => ({ lat: a[0], lng: a[1] });
+
+function setRoute(pts, save = true) {
+  if (!pts || pts.length < 2) {
+    RT = null; routeLine.setLatLngs([]); if (save) store.set('route', null); $('reroute').classList.add('hidden'); return;
+  }
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + dist(P(pts[i - 1]), P(pts[i])));
+  RT = { pts, cum, total: cum[cum.length - 1], idx: -1, along: 0, off: Infinity };
+  routeLine.setLatLngs(pts);
+  if (save) store.set('route', pts);
+}
+function projectOnSeg(p, a, b) {
+  const k = Math.cos(rad(p.lat));
+  const ax = a[1] * k, ay = a[0], dx = b[1] * k - ax, dy = b[0] - ay, l2 = dx * dx + dy * dy;
+  let t = l2 ? ((p.lng * k - ax) * dx + (p.lat - ay) * dy) / l2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  const pt = { lat: a[0] + (b[0] - a[0]) * t, lng: a[1] + (b[1] - a[1]) * t };
+  return { t, pt, d: dist(p, pt) };
+}
+function locateOnRoute(p, full) {
+  const n = RT.pts.length;
+  full = full || RT.idx < 0;
+  const from = full ? 0 : Math.max(0, RT.idx - 50), to = full ? n - 1 : Math.min(n - 1, RT.idx + 400);
+  let best = null;
+  for (let i = from; i < to; i++) {
+    const r = projectOnSeg(p, RT.pts[i], RT.pts[i + 1]);
+    if (!best || r.d < best.d) best = { ...r, i };
+  }
+  if (!full && best && best.d > 500) return locateOnRoute(p, true);
+  return best;
+}
+function updateRoutePos(full) {
+  if (!RT || !S.pos) return;
+  const r = locateOnRoute(S.pos, full);
+  if (!r) return;
+  RT.idx = r.i; RT.along = RT.cum[r.i] + (RT.cum[r.i + 1] - RT.cum[r.i]) * r.t; RT.off = r.d;
+}
+function pointAt(along) {
+  along = Math.max(0, Math.min(RT.total, along));
+  let lo = 0, hi = RT.cum.length - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (RT.cum[m] <= along) lo = m; else hi = m; }
+  const a = RT.pts[lo], b = RT.pts[hi], seg = RT.cum[hi] - RT.cum[lo], t = seg ? (along - RT.cum[lo]) / seg : 0;
+  return { pos: { lat: a[0] + (b[0] - a[0]) * t, lng: a[1] + (b[1] - a[1]) * t }, heading: bearing(P(a), P(b)), idx: lo };
+}
+const onRoute = () => RT && RT.off < Math.max(250, S.unc * 1.5);
+
+async function buildRoute() {
+  if (!S.target) return;
+  if (!S.pos) { say('Спершу вкажіть свою позицію («📍 Я тут»), потім прокладіть маршрут.'); return; }
+  say('Прокладаю маршрут…');
+  const f = S.pos, t = S.target;
+  const url = `https://router.project-osrm.org/route/v1/driving/${f.lng},${f.lat};${t.lng},${t.lat}?overview=full&geometries=geojson&alternatives=false&steps=false`;
+  try {
+    const r = await fetch(url);
+    const j = await r.json();
+    if (j.code !== 'Ok' || !j.routes || !j.routes[0]) throw new Error(j.message || j.code || 'немає маршруту');
+    const pts = j.routes[0].geometry.coordinates.map(c => [+c[1].toFixed(5), +c[0].toFixed(5)]);
+    setRoute(pts); updateRoutePos(true); renderTarget();
+    $('reroute').classList.add('hidden');
+    setFollow(false); map.fitBounds(routeLine.getBounds(), { padding: [30, 30] });
+    say(`Маршрут ${fmtDist(RT.total)}, ~${fmtTime(j.routes[0].duration)}. Збережено — працює без інтернету.`);
+  } catch (e) {
+    say('Не вдалося прокласти маршрут — потрібен інтернет. (' + e.message + ')');
+  }
+}
+const fmtTime = s => { const m = Math.round(s / 60); return m < 60 ? m + ' хв' : Math.floor(m / 60) + ' год ' + (m % 60) + ' хв'; };
+
+function setTarget(p, name) {
+  S.target = { lat: p.lat, lng: p.lng, name: name || '' }; store.set('target', S.target);
+  setRoute(null); renderTarget(); buildRoute();
+}
+
 map.on('dragstart', () => setFollow(false));
 map.on('click', e => onMapTap(e.latlng));
 
@@ -231,8 +308,13 @@ function acceptFix(fix) {
   if (S.speed > 2) { S.drSpeed = S.speed; store.set('drSpeed', S.drSpeed); }
   S.pos = { lat: fix.lat, lng: fix.lng };
   S.unc = fix.acc; S.lastFix = fix; S.lastFixTime = Date.now();
+  const wasGps = S.mode === 'gps';
   setMode('gps');
-  say('');
+  updateRoutePos();
+  if (RT && RT.off > 200 && RT.along < RT.total - 100) {
+    $('reroute').classList.remove('hidden');
+    say('Ви зійшли з маршруту (' + fmtDist(RT.off) + '). Можна перебудувати, якщо є інтернет.');
+  } else if (!wasGps) say('');
   render(true);
 }
 
@@ -260,12 +342,24 @@ function tick() {
   lastTick = now;
   if (!S.manualDR && S.mode !== 'dr' && S.lastFixTime && Date.now() - S.lastFixTime > CFG.lostAfter) enterDR('lost');
   if ((S.mode === 'dr' || S.manualDR) && S.pos) {
-    const h = (S.useCompass && S.compass != null) ? S.compass : S.heading;
-    S.heading = h;
     const m = S.drSpeed * dt;
-    if (m > 0) {
-      S.pos = move(S.pos, h, m);
-      S.unc += m * 0.07 + 0.3 * dt;
+    if (onRoute()) {
+      // їдемо вздовж збереженого маршруту — бічна похибка зникає
+      if (m > 0 && RT.along < RT.total) {
+        const q = pointAt(RT.along + m);
+        RT.along = Math.min(RT.total, RT.along + m); RT.idx = q.idx; RT.off = 0;
+        S.pos = q.pos; S.heading = q.heading;
+        S.unc += m * 0.03 + 0.2 * dt;
+        if (RT.along >= RT.total) { S.drSpeed = 0; updDrSpeed(); say('Ви на місці (за оцінкою).'); }
+      }
+    } else {
+      const h = (S.useCompass && S.compass != null) ? S.compass : S.heading;
+      S.heading = h;
+      if (m > 0) {
+        S.pos = move(S.pos, h, m);
+        S.unc += m * 0.07 + 0.3 * dt;
+        updateRoutePos();
+      }
     }
     S.speed = S.drSpeed;
     render(false);
@@ -338,8 +432,14 @@ function renderTarget() {
   $('tName').textContent = S.target.name || '';
   if (!S.pos) { $('tDist').textContent = '—'; return; }
   const d = dist(S.pos, S.target), b = bearing(S.pos, S.target);
-  $('tDist').textContent = fmtDist(d);
-  $('tBear').textContent = 'напрям ' + dirName(b) + ' (' + Math.round(b) + '°), по прямій';
+  if (RT && RT.off < 300) {
+    const left = Math.max(0, RT.total - RT.along);
+    $('tDist').textContent = fmtDist(left) + ' маршрутом';
+    $('tBear').textContent = (S.speed > 3 ? 'ще ~' + fmtTime(left / S.speed) + ' · ' : '') + 'по прямій ' + fmtDist(d);
+  } else {
+    $('tDist').textContent = fmtDist(d);
+    $('tBear').textContent = 'напрям ' + dirName(b) + ' (' + Math.round(b) + '°), по прямій' + (RT ? ' · поза маршрутом' : '');
+  }
   $('arrow').style.transform = `rotate(${(b - S.heading + 360) % 360}deg)`;
 }
 
@@ -350,6 +450,8 @@ function onMapTap(ll) {
   if (S.tapMode === 'here') {
     S.pos = p; S.unc = 30; S.tapMode = 'heading';
     if (S.mode !== 'gps' && !S.manualDR) setMode('dr');
+    updateRoutePos(true);
+    if (onRoute()) { S.pos = pointAt(RT.along).pos; S.heading = pointAt(RT.along).heading; } // прилипнути до маршруту
     render(false);
     hint('Тепер торкніться точки на дорозі ПОПЕРЕДУ — це задасть напрям руху. (Або «Я тут» ще раз, щоб пропустити.)');
   } else if (S.tapMode === 'heading') {
@@ -357,8 +459,7 @@ function onMapTap(ll) {
     S.tapMode = null; hint(''); render(false);
     say('Позицію і напрям задано вручну.');
   } else if (S.tapMode === 'target') {
-    S.target = { ...p, name: '' }; store.set('target', S.target);
-    S.tapMode = null; hint(''); renderTarget();
+    S.tapMode = null; hint(''); setTarget(p, '');
   } else if (S.tapMode === 'place') {
     const name = prompt('Назва місця:', 'Місце ' + (S.places.length + 1));
     S.tapMode = null; hint('');
@@ -388,8 +489,40 @@ $('bDR').onclick = () => {
 $('spdMinus').onclick = () => { S.drSpeed = Math.max(0, S.drSpeed - 10/3.6); store.set('drSpeed', S.drSpeed); updDrSpeed(); };
 $('spdPlus').onclick = () => { S.drSpeed = Math.min(200/3.6, S.drSpeed + 10/3.6); store.set('drSpeed', S.drSpeed); updDrSpeed(); };
 $('useGps').onclick = () => { if (S.pendingGps) acceptFix(S.pendingGps); };
-$('tClear').onclick = () => { S.target = null; store.set('target', null); renderTarget(); };
-$('bTarget').onclick = () => { S.tapMode = 'target'; setFollow(false); hint('Торкніться карти — точка призначення.'); };
+$('tClear').onclick = () => { S.target = null; store.set('target', null); setRoute(null); renderTarget(); say(''); };
+$('reroute').onclick = () => buildRoute();
+$('bTarget').onclick = () => {
+  openSheet(`<h3>Куди їдемо?</h3>
+    <p>Маршрут прокладається, поки є інтернет, і зберігається в телефоні. Без GPS позиція рухатиметься вздовж нього.</p>
+    <div class="row"><input id="q" type="search" placeholder="Місто, село, адреса…" autocomplete="off"
+      style="flex:1;min-height:48px;border-radius:12px;border:1px solid #3b4452;background:#0f1216;color:var(--text);padding:0 12px;font-size:16px">
+      <button id="qGo" class="primary" style="flex:0 0 auto">Знайти</button></div>
+    <div id="qRes"></div>
+    <div class="row" style="margin-top:10px"><button id="tMap">Вибрати на карті</button>
+      ${S.target ? '<button id="tRe">↻ Перебудувати маршрут</button>' : ''}</div>
+    ${S.places.length ? '<p style="margin-top:14px">Збережені місця:</p>' + S.places.map((p, i) =>
+      `<div class="place"><span>${esc(p.name)}</span><button data-pt="${i}">🎯 Сюди</button></div>`).join('') : ''}`);
+  const go = async () => {
+    const q = $('q').value.trim(); if (!q) return;
+    $('qRes').innerHTML = '<p>Шукаю…</p>';
+    try {
+      const r = await fetch('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=7&countrycodes=ua&accept-language=uk&q=' + encodeURIComponent(q));
+      const list = await r.json();
+      if (!list.length) { $('qRes').innerHTML = '<p>Нічого не знайдено.</p>'; return; }
+      $('qRes').innerHTML = list.map((x, i) => `<div class="place"><span>${esc(x.display_name)}</span><button data-r="${i}">🎯</button></div>`).join('');
+      $('qRes').querySelectorAll('[data-r]').forEach(b => b.onclick = () => {
+        const x = list[+b.dataset.r]; closeSheet();
+        setTarget({ lat: +x.lat, lng: +x.lon }, x.name || x.display_name.split(',')[0]);
+      });
+    } catch { $('qRes').innerHTML = '<p>Пошук потребує інтернету. Без мережі виберіть ціль на карті або зі збережених місць.</p>'; }
+  };
+  $('qGo').onclick = go;
+  $('q').onkeydown = e => { if (e.key === 'Enter') go(); };
+  $('tMap').onclick = () => { closeSheet(); S.tapMode = 'target'; setFollow(false); hint('Торкніться карти — точка призначення.'); };
+  if ($('tRe')) $('tRe').onclick = () => { closeSheet(); buildRoute(); };
+  $('sheetBody').querySelectorAll('[data-pt]').forEach(b => b.onclick = () => {
+    const p = S.places[+b.dataset.pt]; closeSheet(); setTarget(p, p.name); });
+};
 
 $('sheet').onclick = e => { if (e.target.id === 'sheet') closeSheet(); };
 function openSheet(html) { $('sheetBody').innerHTML = html; $('sheet').classList.remove('hidden'); }
@@ -406,9 +539,9 @@ $('bPlaces').onclick = () => {
     <div class="row" style="margin-top:10px"><button id="addPlace" class="primary">+ Додати на карті</button>
     <button id="addCur">+ Поточна позиція</button></div>`);
   $('sheetBody').querySelectorAll('[data-go]').forEach(b => b.onclick = () => {
-    const p = S.places[+b.dataset.go]; S.target = { ...p }; store.set('target', S.target); closeSheet(); renderTarget(); });
+    const p = S.places[+b.dataset.go]; closeSheet(); setTarget(p, p.name); });
   $('sheetBody').querySelectorAll('[data-here]').forEach(b => b.onclick = () => {
-    const p = S.places[+b.dataset.here]; S.pos = { lat: p.lat, lng: p.lng }; S.unc = 50;
+    const p = S.places[+b.dataset.here]; S.pos = { lat: p.lat, lng: p.lng }; S.unc = 50; updateRoutePos(true);
     if (S.mode !== 'gps' && !S.manualDR) setMode('dr'); closeSheet(); setFollow(true); });
   $('sheetBody').querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
     S.places.splice(+b.dataset.del, 1); store.set('places', S.places); drawPlaces(); $('bPlaces').onclick(); });
@@ -492,6 +625,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 // ---------- старт ----------
 (async function init() {
   try { const f = await idbGet('map'); if (f) usePmtiles(f.blob, f.name); else useOsm(); } catch { useOsm(); }
+  setRoute(store.get('route', null), false); updateRoutePos(true);
   drawPlaces(); setMode('none'); render(true); renderTarget();
   if (S.useCompass) enableCompass();
   if (wakeOn) wake();
